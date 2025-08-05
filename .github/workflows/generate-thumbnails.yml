@@ -1,0 +1,4 @@
+name: Generate Thumbnails
+
+on:
+  push:
