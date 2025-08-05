@@ -32,6 +32,7 @@ jobs:
       run: npm install sharp
 
     - name: Generate thumbnails
+      id: generate
       run: |
         node << 'EOF'
         const sharp = require('sharp');
@@ -54,10 +55,8 @@ jobs:
               const thumbDir = path.join('thumbnails', path.dirname(relativePath));
               const thumbPath = path.join(thumbDir, item.replace(/\.[^.]+$/, '.jpg'));
               
-              // Create thumbnail directory if it doesn't exist
               fs.mkdirSync(thumbDir, { recursive: true });
               
-              // Check if thumbnail already exists and is newer than source
               let shouldGenerate = true;
               if (fs.existsSync(thumbPath)) {
                 const sourceStats = fs.statSync(fullPath);
@@ -90,6 +89,7 @@ jobs:
 
         generateThumbnails().then((count) => {
           console.log(`Thumbnail generation complete. Processed ${count} images.`);
+          fs.writeFileSync('processed_count.txt', count.toString());
         }).catch(console.error);
         EOF
 
@@ -97,14 +97,15 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: duncanburnside/sumaila-img-thumbs
-        token: ${{ secrets.GITHUB_TOKEN }}
+        token: ${{ secrets.YOUR_PERSONAL_ACCESS_TOKEN }} # Replace with your PAT secret
         path: thumbs-repo
 
     - name: Copy thumbnails to thumbs repo
       run: |
-        # Copy new/updated thumbnails (preserve existing ones)
         if [ -d "thumbnails" ]; then
-          cp -r thumbnails/* thumbs-repo/ 2>/dev/null || true
+          cp -r thumbnails/* thumbs-repo/
+        else
+          echo "No thumbnails were generated."
         fi
 
     - name: Commit and push thumbnails
