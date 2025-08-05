@@ -1,0 +1,121 @@
+name: Generate Thumbnails
+
+on:
+  push:
+    paths:
+      - '**/*.jpg'
+      - '**/*.jpeg'
+      - '**/*.png'
+      - '**/*.gif'
+      - '**/*.webp'
+      - '.trigger-thumbnails'  # Allow manual triggering
+  workflow_dispatch: # Allows manual triggering from GitHub UI
+  schedule:
+    - cron: '0 2 * * 0'  # Run weekly on Sundays at 2 AM to catch any missed images
+
+jobs:
+  generate-thumbnails:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout source repo
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Install Sharp
+      run: npm install sharp
+
+    - name: Generate thumbnails
+      run: |
+        node << 'EOF'
+        const sharp = require('sharp');
+        const fs = require('fs');
+        const path = require('path');
+
+        async function generateThumbnails(dir = '.') {
+          const items = fs.readdirSync(dir);
+          let processedCount = 0;
+          
+          for (const item of items) {
+            const fullPath = path.join(dir, item);
+            const stat = fs.statSync(fullPath);
+            
+            if (stat.isDirectory() && !item.startsWith('.') && item !== 'node_modules' && item !== 'thumbnails') {
+              const subCount = await generateThumbnails(fullPath);
+              processedCount += subCount;
+            } else if (stat.isFile() && /\.(jpe?g|png|gif|webp)$/i.test(item)) {
+              const relativePath = path.relative('.', fullPath);
+              const thumbDir = path.join('thumbnails', path.dirname(relativePath));
+              const thumbPath = path.join(thumbDir, item.replace(/\.[^.]+$/, '.jpg'));
+              
+              // Create thumbnail directory if it doesn't exist
+              fs.mkdirSync(thumbDir, { recursive: true });
+              
+              // Check if thumbnail already exists and is newer than source
+              let shouldGenerate = true;
+              if (fs.existsSync(thumbPath)) {
+                const sourceStats = fs.statSync(fullPath);
+                const thumbStats = fs.statSync(thumbPath);
+                shouldGenerate = sourceStats.mtime > thumbStats.mtime;
+              }
+              
+              if (shouldGenerate) {
+                try {
+                  await sharp(fullPath)
+                    .resize(300, 300, {
+                      fit: 'cover',
+                      position: 'center'
+                    })
+                    .jpeg({ quality: 80 })
+                    .toFile(thumbPath);
+                  
+                  console.log(`Generated thumbnail: ${thumbPath}`);
+                  processedCount++;
+                } catch (error) {
+                  console.error(`Error processing ${fullPath}:`, error);
+                }
+              } else {
+                console.log(`Thumbnail up to date: ${thumbPath}`);
+              }
+            }
+          }
+          return processedCount;
+        }
+
+        generateThumbnails().then((count) => {
+          console.log(`Thumbnail generation complete. Processed ${count} images.`);
+        }).catch(console.error);
+        EOF
+
+    - name: Checkout thumbnails repo
+      uses: actions/checkout@v4
+      with:
+        repository: duncanburnside/sumaila-img-thumbs
+        token: ${{ secrets.GITHUB_TOKEN }}
+        path: thumbs-repo
+
+    - name: Copy thumbnails to thumbs repo
+      run: |
+        # Copy new/updated thumbnails (preserve existing ones)
+        if [ -d "thumbnails" ]; then
+          cp -r thumbnails/* thumbs-repo/ 2>/dev/null || true
+        fi
+
+    - name: Commit and push thumbnails
+      run: |
+        cd thumbs-repo
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add .
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+        else
+          git commit -m "Update thumbnails $(date)"
+          git push
+        fi
