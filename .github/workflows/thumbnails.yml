@@ -1,4 +1,4 @@
-name: Generate Thumbnails
+name: Generate and Deploy Thumbnails
 
 on:
   push:
@@ -8,115 +8,62 @@ on:
       - '**/*.png'
       - '**/*.gif'
       - '**/*.webp'
-      - '.trigger-thumbnails'  # Allow manual triggering
-  workflow_dispatch: # Allows manual triggering from GitHub UI
-  schedule:
-    - cron: '0 2 * * 0'  # Run weekly on Sundays at 2 AM to catch any missed images
+  workflow_dispatch:
 
 jobs:
-  generate-thumbnails:
+  build-and-deploy:
     runs-on: ubuntu-latest
-    
     steps:
-    - name: Checkout source repo
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Checkout Source Repo (sumaila-img)
+        uses: actions/checkout@v4
+        with:
+          repository: duncanburnside/sumaila-img # The repo with original images
+          path: source_repo
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '18'
+      - name: Checkout Target Repo (sumaila-img-thumbs)
+        uses: actions/checkout@v4
+        with:
+          repository: duncanburnside/sumaila-img-thumbs # The repo for thumbnails
+          token: ${{ secrets.THUMBS_GEN }}
+          path: target_repo
 
-    - name: Install Sharp
-      run: npm install sharp
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
 
-    - name: Generate thumbnails
-      id: generate
-      run: |
-        node << 'EOF'
-        const sharp = require('sharp');
-        const fs = require('fs');
-        const path = require('path');
+      - name: Install Sharp CLI
+        run: npm install -g sharp-cli
 
-        async function generateThumbnails(dir = '.') {
-          const items = fs.readdirSync(dir);
-          let processedCount = 0;
-          
-          for (const item of items) {
-            const fullPath = path.join(dir, item);
-            const stat = fs.statSync(fullPath);
+      - name: Generate Thumbnails
+        run: |
+          find source_repo -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" -o -iname "*.webp" \) | while read img_path; do
+            relative_path="${img_path#source_repo/}"
+            target_dir="target_repo/$(dirname "$relative_path")"
+            target_filename="$(basename "$relative_path" | sed 's/\.[^.]*$/.jpeg/')"
+            target_path="$target_dir/$target_filename"
             
-            if (stat.isDirectory() && !item.startsWith('.') && item !== 'node_modules' && item !== 'thumbnails') {
-              const subCount = await generateThumbnails(fullPath);
-              processedCount += subCount;
-            } else if (stat.isFile() && /\.(jpe?g|png|gif|webp)$/i.test(item)) {
-              const relativePath = path.relative('.', fullPath);
-              const thumbDir = path.join('thumbnails', path.dirname(relativePath));
-              const thumbPath = path.join(thumbDir, item.replace(/\.[^.]+$/, '.jpg'));
-              
-              fs.mkdirSync(thumbDir, { recursive: true });
-              
-              let shouldGenerate = true;
-              if (fs.existsSync(thumbPath)) {
-                const sourceStats = fs.statSync(fullPath);
-                const thumbStats = fs.statSync(thumbPath);
-                shouldGenerate = sourceStats.mtime > thumbStats.mtime;
-              }
-              
-              if (shouldGenerate) {
-                try {
-                  await sharp(fullPath)
-                    .resize(300, 300, {
-                      fit: 'cover',
-                      position: 'center'
-                    })
-                    .jpeg({ quality: 80 })
-                    .toFile(thumbPath);
-                  
-                  console.log(`Generated thumbnail: ${thumbPath}`);
-                  processedCount++;
-                } catch (error) {
-                  console.error(`Error processing ${fullPath}:`, error);
-                }
-              } else {
-                console.log(`Thumbnail up to date: ${thumbPath}`);
-              }
-            }
-          }
-          return processedCount;
-        }
+            mkdir -p "$target_dir"
+            
+            # Only generate if the source is newer than the target, or if target doesn't exist
+            if [ ! -f "$target_path" ] || [ "$(stat -c %Y "$img_path")" -gt "$(stat -c %Y "$target_path")" ]; then
+              echo "Generating thumbnail for $relative_path"
+              sharp --input "$img_path" --resize 300 300 --fit cover --position center --to-format jpeg --jpeg-quality 80 --output "$target_path"
+            else
+              echo "Thumbnail for $relative_path is up to date."
+            fi
+          done
 
-        generateThumbnails().then((count) => {
-          console.log(`Thumbnail generation complete. Processed ${count} images.`);
-          fs.writeFileSync('processed_count.txt', count.toString());
-        }).catch(console.error);
-        EOF
-
-    - name: Checkout thumbnails repo
-      uses: actions/checkout@v4
-      with:
-        repository: duncanburnside/sumaila-img-thumbs
-        token: ${{ secrets.THUMBS_GEN }} 
-        path: thumbs-repo
-
-    - name: Copy thumbnails to thumbs repo
-      run: |
-        if [ -d "thumbnails" ]; then
-          cp -r thumbnails/* thumbs-repo/
-        else
-          echo "No thumbnails were generated."
-        fi
-
-    - name: Commit and push thumbnails
-      run: |
-        cd thumbs-repo
-        git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Action"
-        git add .
-        if git diff --staged --quiet; then
-          echo "No changes to commit"
-        else
-          git commit -m "Update thumbnails $(date)"
-          git push
-        fi
+      - name: Commit and Push Changes
+        run: |
+          cd target_repo
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          if [ -n "$(git status --porcelain)" ]; then
+            git add .
+            git commit -m "Update thumbnails [$(date)]"
+            git push
+          else
+            echo "No changes to commit."
+          fi
